@@ -4,7 +4,7 @@
 import torch
 from Services import Services
 from TaskQueue import TaskQueue
-from GA_ACAgent import GAACAgent
+from MDDPGAgent import MDDPGAgent
 from Buffer import Buffer
 import numpy as np
 from torch.cuda.amp import GradScaler
@@ -39,13 +39,13 @@ class Env:
                                           arrive_nums=arrive_nums, data_nums=data_nums,
                                           device_nums=device_nums, service_nums=service_nums)
 
-        self.Devices = [GAACAgent(service_nums=service_nums, f=f[idx], f_mean=np.median(f), rho=rho[idx], tr=tr[idx],
-                                  dm=dm[idx], local_edge=local_edge[idx], idx=idx, cpu_cycles=np.array(cpu_cycles),
-                                  avg_arrive_nums=np.array(arrive_nums), step=buffer_step, lr=lr,
-                                  max_run_memorys=max_run_memorys, sw=sw, refresh_frequency=refresh_frequency,
-                                  state_nums=state_nums, freedom_nums=freedom_nums, hidden_nums=hidden_nums,
-                                  agents_nums=device_nums, gamma=gamma, soft_upate_weight=soft_update_weight,
-                                  soft_update_step=soft_update_step)
+        self.Devices = [MDDPGAgent(service_nums=service_nums, f=f[idx], f_mean=np.median(f), rho=rho[idx], tr=tr[idx],
+                                   dm=dm[idx], local_edge=local_edge[idx], idx=idx, cpu_cycles=np.array(cpu_cycles),
+                                   avg_arrive_nums=np.array(arrive_nums), step=buffer_step, lr=lr,
+                                   max_run_memorys=max_run_memorys, sw=sw, refresh_frequency=refresh_frequency,
+                                   state_nums=state_nums, freedom_nums=freedom_nums, hidden_nums=hidden_nums,
+                                   agents_nums=device_nums, gamma=gamma, soft_upate_weight=soft_update_weight,
+                                   soft_update_step=soft_update_step)
                         for idx in range(device_nums)]
 
         if start_record is None:
@@ -117,9 +117,9 @@ class Env:
         observation = self.get_states()
         new_tasks_size = torch.stack([torch.tensor(i.queue_size) for i in new_tasks], dim=0)
         observation = torch.concat([observation, new_tasks_size], dim=1).unsqueeze(0).float()
-        acion, action_prob, state, reward, done_task_nums = zip(
+        action, action_prob, state, reward, done_task_nums = zip(
             *[d.act(s, observation[:, idx, :])[0] for idx, (d, s) in enumerate(zip(self.Devices, new_tasks))])
-        return torch.stack(acion, dim=0), torch.stack(action_prob, dim=0), torch.stack(state, dim=0), torch.stack(
+        return torch.stack(action, dim=0),torch.stack(action_prob, dim=0) ,torch.stack(state, dim=0), torch.stack(
             reward, dim=0), np.sum(done_task_nums, axis=0)
 
     def get_states(self):
@@ -152,13 +152,18 @@ class Env:
         adj[edge_index[0], edge_index[1]] = 1
         adj[edge_index[1], edge_index[0]] = 1
 
-        return adj, torch.LongTensor(np.array(edge_index)), [torch.tensor(np.nonzero(adj[i])[0]).unsqueeze(0) for i in
-                                                             range(total)]
+        local_edges = []
+        for i in range(total):
+            local_edge_ = torch.tensor(np.nonzero(adj[i])[0])
+            local_edge_ = local_edge_[local_edge_ != i]
+            local_edge_ = torch.concat([torch.tensor([i]), local_edge_], dim=0).unsqueeze(0)
+            local_edges.append(local_edge_)
+        return adj, torch.LongTensor(np.array(edge_index)), local_edges
 
     def update(self):
         cmp_device = "cuda"
         data_s = [[] for _ in range(len(self.Devices))]
-        # self.Devices = [i.GA_AC.to(cmp_device) for i in self.Devices]
+        # self.Devices = [i.MDDPGS.to(cmp_device) for i in self.Devices]
         for counter, data in enumerate(self.buffer.BufferLoader(self.batch_size)):
             actions, action_probs, states, rewards = data
             for d in self.Devices:
@@ -174,60 +179,43 @@ class Env:
         # update the critic
         TD_ERROR = [[] for _ in range(len(self.Devices))]
         for device in self.Devices:
-            device.GA_AC = device.GA_AC.to(cmp_device)
+            device.MDDPGS = device.MDDPGS.to(cmp_device)
             TD_ERROR[device.idx].extend(device.update_critic(data_s[device.idx]))
 
         # update the actor
-        device_optimizers = [[i, torch.optim.AdamW(params=i.GA_AC.actor.parameters(), lr=i.lr)] for i in self.Devices]
+        device_optimizers = [[i, torch.optim.AdamW(params=i.MDDPGS.actor.parameters(), lr=i.lr)] for i in self.Devices]
         scaler = GradScaler()
         for data_each in range(len(data_s[0])):
             for device, opt in device_optimizers:
-                p, I_loc, I_mig, a_prob = device.generate_action(observation=data_s[device.idx][data_each][5],
-                                                                 task_nums=data_s[device.idx][data_each][4], update=False)
-                loss = device.actor_loss(action_t=torch.concat([I_loc, I_mig, p], dim=-1),
-                                         action_prob_t=a_prob,
-                                         action_t_plus=data_s[device.idx][data_each][0][:, 1, :, :],
-                                         action_prob_sample=data_s[device.idx][data_each][1][:, 0],
-                                         reward=data_s[device.idx][data_each][3][:, :-1],
-                                         state_t=data_s[device.idx][data_each][2][:, 0, :, :],
-                                         state_t_plus=data_s[device.idx][data_each][2][:, 1, :, :],
-                                         TD_error=TD_ERROR[device.idx][data_each])
-                # action_t = action_t[device.local_edge[0], :, :]
-                # action_prob_t = action_t_prob[device.idx, :]
-                # action_t_plus = data_s[device.idx][data_each][0][:, 1, :, :]
-                # action_prob_sample = data_s[device.idx][data_each][1][:, 0]
-                # reward = data_s[device.idx][data_each][3][:, :-1]
-                # state_t = data_s[device.idx][data_each][2][:, 0, :, :]
-                # state_t_plus = data_s[device.idx][data_each][2][:, 1, :, :]
-                # reward = reward.to("cuda")
-                # action_prob_sample = action_prob_sample.to("cuda")
-                # action_t_plus = action_t_plus.to("cuda")
-                # state_t = state_t.to("cuda")
-                # state_t_plus = state_t_plus.to("cuda")
-                # reward = torch.sum(device.GA_AC.gamma * reward, dim=-1)
-                # with autocast():
-                #     Q_t = device.GA_AC.get_target(observation=state_t, actions=action_t)
-                #     Q_t_plus = device.GA_AC.get_target(observation=state_t_plus, actions=action_t_plus) + reward
-                #     Advantage = Q_t_plus - Q_t
-                #     if True:
-                #         weight = torch.exp(action_prob_t) / torch.exp(action_prob_sample)
-                #     else:
-                #         weight = 1
-                #     clip_weight = torch.clip_(weight, 1 - 0.1, 1 + 0.1)
-                #     loss = -torch.min(weight, clip_weight) * Advantage
+
+                action_t = []
+                for i in device.local_edge[0].tolist():
+
+                    action_i, _ = self.Devices[i].generate_action(observation=data_s[i][data_each][5],
+                                                             task_nums=data_s[i][data_each][4], update=False)
+                    action_t.append(torch.concat(action_i, dim=-1))
+
+                action_t = torch.stack(action_t, dim=1)
+                loss = device.actor_loss(action_t=action_t,
+                                         state_t=data_s[device.idx][data_each][2][:, 0, :, :])
+
                 opt.zero_grad()
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
 
-                # if data_each % self.soft_update_step == 0:
-                #     for target_parameter, main_parameter in zip(device.GA_AC.actor.parameters(),
-                #                                                 device.GA_AC.actor_update.parameters()):
-                #         target_parameter.data.copy_(
-                #             (1 - self.soft_update_weight) * main_parameter + self.soft_update_weight * target_parameter)
+                if data_each % self.soft_update_step == 0:
+                    for target_parameter, main_parameter in zip(device.MDDPGS.actor.parameters(),
+                                                                device.MDDPGS.actor_update.parameters()):
+                        target_parameter.data.copy_(
+                            (1 - self.soft_update_weight) * main_parameter + self.soft_update_weight * target_parameter)
+                        if torch.isnan(target_parameter).any():
+                            print("error")
 
         torch.cuda.empty_cache()
-        [i.GA_AC.to("cpu") for i in self.Devices]
+        for i in self.Devices:
+            i.MDDPGS.to("cpu")
+            i.VAR *= i.temperature
 
 
 if __name__ == '__main__':
@@ -235,13 +223,13 @@ if __name__ == '__main__':
     all_time = 20000
     delta_t = 15
     refresh_frequency = 1
-    sw = 5
+    sw = 20
     batch_size = 64
     gamma = 0.9
-    soft_update_weight = 0.9
+    soft_update_weight = 0.1
     soft_update_step = 30
-    buffer_step = 5
-    buffer_size = 300
+    buffer_step = 3
+    buffer_size = 200
     hidden_nums = 64
     lr = 0.005
 

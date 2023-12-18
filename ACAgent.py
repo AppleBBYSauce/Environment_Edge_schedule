@@ -89,7 +89,7 @@ class ACAgent(BaseAgent):
         phi = self.w_cpu * self.load_index[0] + self.w_memory * self.load_index[1]
 
         # calculate the penalty of overdue task
-        P = ((self.f * self.p) / (self.cpu_cycles)) * np.array(self.destructure_queue.get_size())
+        P = ((self.f * self.p.detach().numpy()) / (self.cpu_cycles)) * np.array(self.destructure_queue.get_size())
         P = np.nansum(P)
         self.task_latency[3] = P
 
@@ -100,7 +100,7 @@ class ACAgent(BaseAgent):
 
     def process_cur(self):
 
-        p = self.p.numpy()
+        p = self.p.detach().numpy()
 
         cpu_useage_ratio = np.array([0 for _ in range(self.service_nums)])
         memory_usage_ratio = np.array([0 for _ in range(self.service_nums)])
@@ -153,9 +153,8 @@ class ACAgent(BaseAgent):
 
     def pre_process(self, *args, **kwargs):
 
-
         I_loc = self.I_loc.numpy()
-        p = self.p.numpy()
+        p = self.p.detach().numpy()
         # delete overdue tasks
         self.task_queue.drop_with_key(func=lambda x, y: x > y, key="rd", y=self.tau / self.refresh_frequency)
         self.tempoary_state_inf.drop_with_key(func=lambda x, y: x > y, key="rd", y=self.tau / self.refresh_frequency)
@@ -179,12 +178,12 @@ class ACAgent(BaseAgent):
         TR = np.sum(self.task_queue.return_sum(key="dl") / self.tr)
 
         # calculate the calculation latency
-        arrive_ratio = np.array(I_loc) / self.refresh_frequency
+        arrive_ratio = np.array(self.task_queue.get_size()) / self.refresh_frequency
         service_ratio = ((self.f * p) / self.cpu_cycles)
         sojourn_time = service_ratio - arrive_ratio
 
         # if service ratio below the arrive ratio, we use the overdue time to substitude sojourn time
-        sojourn_time = np.where(sojourn_time > 0, service_ratio,  1 / self.tau)[arrive_ratio > 0]
+        sojourn_time = np.where(sojourn_time > 0, service_ratio,  3 / self.tau)[arrive_ratio > 0]
         CT = np.sum(1 / sojourn_time)
 
         self.task_latency[0] = SW

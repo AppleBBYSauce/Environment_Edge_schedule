@@ -192,29 +192,7 @@ class Env:
                                          state_t=data_s[device.idx][data_each][2][:, 0, :, :],
                                          state_t_plus=data_s[device.idx][data_each][2][:, 1, :, :],
                                          TD_error=TD_ERROR[device.idx][data_each])
-                # action_t = action_t[device.local_edge[0], :, :]
-                # action_prob_t = action_t_prob[device.idx, :]
-                # action_t_plus = data_s[device.idx][data_each][0][:, 1, :, :]
-                # action_prob_sample = data_s[device.idx][data_each][1][:, 0]
-                # reward = data_s[device.idx][data_each][3][:, :-1]
-                # state_t = data_s[device.idx][data_each][2][:, 0, :, :]
-                # state_t_plus = data_s[device.idx][data_each][2][:, 1, :, :]
-                # reward = reward.to("cuda")
-                # action_prob_sample = action_prob_sample.to("cuda")
-                # action_t_plus = action_t_plus.to("cuda")
-                # state_t = state_t.to("cuda")
-                # state_t_plus = state_t_plus.to("cuda")
-                # reward = torch.sum(device.GA_AC.gamma * reward, dim=-1)
-                # with autocast():
-                #     Q_t = device.GA_AC.get_target(observation=state_t, actions=action_t)
-                #     Q_t_plus = device.GA_AC.get_target(observation=state_t_plus, actions=action_t_plus) + reward
-                #     Advantage = Q_t_plus - Q_t
-                #     if True:
-                #         weight = torch.exp(action_prob_t) / torch.exp(action_prob_sample)
-                #     else:
-                #         weight = 1
-                #     clip_weight = torch.clip_(weight, 1 - 0.1, 1 + 0.1)
-                #     loss = -torch.min(weight, clip_weight) * Advantage
+
                 opt.zero_grad()
                 scaler.scale(loss).backward()
                 scaler.step(opt)
@@ -238,19 +216,19 @@ if __name__ == '__main__':
     sw = 5
     batch_size = 64
     gamma = 0.9
-    soft_update_weight = 0.9
+    soft_update_weight = 0.1
     soft_update_step = 30
-    buffer_step = 5
+    buffer_step = 3
     buffer_size = 300
     hidden_nums = 64
-    lr = 0.005
+    lr = 0.001
 
-    cpu_cycles = [300, 1000]
-    max_run_memorys = [2 ** 10, 2 ** 10 * 2]
-    arrive_nums = [6, 2]
+    cpu_cycles = [300]
+    max_run_memorys = [2 ** 10]
+    arrive_nums = [6]
     arrive_nums = [i * (refresh_frequency / delta_t) for i in arrive_nums]
-    data_nums = [50, 300]
-    service_nums = 2
+    data_nums = [50]
+    service_nums = 1
 
     device_nums_level_1 = 5
     device_nums_level_2 = 5

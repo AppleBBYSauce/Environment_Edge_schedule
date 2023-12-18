@@ -37,16 +37,17 @@ class MDDPGAgent(ACAgent):
         self.soft_update_step = soft_update_step
         self.lr = lr
         self.step = step
-        self.VAR = 0.5
+        self.VAR = 1
+        self.temperature = 0.95
         self.MDDPGS = MDDPG(state_nums=state_nums, freedom_nums=freedom_nums, hidden_nums=hidden_nums, gamma=gamma,
-                           step=step,
-                           agents_nums=agents_nums, edge_index=self.local_edge_index, local_edge=local_edge)
+                            step=step,
+                            agents_nums=agents_nums, edge_index=self.local_edge_index, local_edge=local_edge)
 
     def generate_action(self, observation, task_nums, update=False):
 
-        actions, probaility = self.GA_AC.generate_act(observation=observation, task_nums=task_nums, update=update)
+        actions, actions_constrain = self.MDDPGS.generate_act(observation=observation, task_nums=task_nums, update=update, VAR=self.VAR)
 
-        return *actions, probaility
+        return actions, actions_constrain
 
     def act(self, new_task_queue: TaskQueue, observation):
 
@@ -54,8 +55,12 @@ class MDDPGAgent(ACAgent):
 
         self.tempoary_state_inf.set_recycle(self.re_direct_queue)  # set re_direct queue as the recycle station
 
-        self.p, self.I_loc, self.I_mig, a_prob = self.generate_action(observation=observation,
+        action, action_constrain = self.generate_action(observation=observation,
                                                                       task_nums=new_task_queue.queue_size)
+
+        p, I_loc, I_mig = action
+        self.p, self.I_loc, self.I_mig = action_constrain
+
         self.p = self.p[0]
         self.I_loc = self.I_loc[0]
         self.I_mig = self.I_mig[0]
@@ -69,10 +74,10 @@ class MDDPGAgent(ACAgent):
         result = [
 
             # action
-            torch.concat([self.I_loc, self.I_mig, self.p], 0),
+            torch.concat([I_loc[0], I_mig[0], p[0]], 0),
 
             # action probability
-            a_prob,
+            torch.empty(size=(1,)),
 
             # states
             observation[0],
@@ -117,45 +122,34 @@ class MDDPGAgent(ACAgent):
 
             with autocast():
                 reward = torch.sum(self.MDDPGS.gamma * reward, dim=-1)
-                Q_pre = self.MDDPGS.get_pre(observation=state_t, actions=action_t)
-                Q_target = self.MDDPGS.get_target(observation=state_t_plus, actions=action_t_plus) + reward
+                Q_pre = self.MDDPGS.get_pre(observation=state_t, actions=action_t.detach())
+                Q_target = self.MDDPGS.get_target(observation=state_t_plus, actions=action_t_plus.detach()) + reward
                 TD_Error = Q_target - Q_pre
                 TD_recorder.append(TD_Error)
 
             optimizer.zero_grad()
-            scaler.scale(TD_Error.mean()).backward()
+            scaler.scale(torch.pow(TD_Error, 2).mean()).backward()
             scaler.step(optimizer)
             scaler.update()
             if e % self.soft_update_step == 0:
-                for target_parameter, main_parameter in zip(self.GA_AC.critic.parameters(),
-                                                            self.GA_AC.critic_update.parameters()):
+                for target_parameter, main_parameter in zip(self.MDDPGS.critic.parameters(),
+                                                            self.MDDPGS.critic_update.parameters()):
                     target_parameter.data.copy_(
                         (1 - self.soft_update_weight) * main_parameter + self.soft_update_weight * target_parameter)
 
-        for target_parameter, main_parameter in zip(self.GA_AC.critic.parameters(),
-                                                    self.GA_AC.critic_update.parameters()):
+        for target_parameter, main_parameter in zip(self.MDDPGS.critic.parameters(),
+                                                    self.MDDPGS.critic_update.parameters()):
             target_parameter.data.copy_(
                 (1 - self.soft_update_weight) * main_parameter + self.soft_update_weight * target_parameter)
+
         torch.cuda.empty_cache()
         return TD_recorder
 
-    def actor_loss(self, reward, state_t, action_t,
-                   action_t_plus, action_prob_t, state_t_plus, TD_error,
-                   action_prob_sample, import_sample: bool = True, epsilon: float = 0.1):
-
-        reward = torch.sum(self.GA_AC.gamma * reward, dim=-1)
+    def actor_loss(self, state_t, action_t):
+        action_t[:, 1:, :] = action_t[:, 1:, :].detach()
         with autocast():
-            # Q_t = self.GA_AC.get_target(observation=state_t, actions=action_t)
-            # Q_t_plus = self.GA_AC.get_target(observation=state_t_plus, actions=action_t_plus) + reward
-            # Advantage = (Q_t_plus - Q_t).detach()
-            Advantage = TD_error.detach()
-            if import_sample:
-                weight = torch.exp(action_prob_t) / torch.exp(action_prob_sample.detach())
-            else:
-                weight = 1
-            clip_weight = torch.clip_(weight, 1 - epsilon, 1 + epsilon)
-            loss = -torch.min(weight * Advantage, clip_weight * Advantage)
-        return loss.mean()
+            loss = -torch.pow(self.MDDPGS.get_target(observation=state_t, actions=action_t), 2).mean()
+        return loss
 
 
 if __name__ == '__main__':
