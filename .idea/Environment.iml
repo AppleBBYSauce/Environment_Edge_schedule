@@ -5,6 +5,8 @@
       <sourceFolder url="file://$MODULE_DIR$" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/GA_AC" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/MDDPG" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/MFMRL" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/Simple" isTestSource="false" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.10 (Environment)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

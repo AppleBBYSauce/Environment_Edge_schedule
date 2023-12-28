@@ -44,7 +44,7 @@ class ACAgent(BaseAgent):
         self.dm = dm
         self.remain_dm = dm
         self.idx = idx
-        self.p = torch.tensor([0] * service_nums).int()
+        self.p = torch.tensor([0] * service_nums)
         self.I_loc = None
         self.I_mig = None
         self.refresh_frequency = refresh_frequency
@@ -56,7 +56,7 @@ class ACAgent(BaseAgent):
         self.task_latency = [0, 0, 0, 0]
 
         # calculate the expiry time
-        self.tau = (np.ceil(cpu_cycles / (((f / self.service_nums) / self.service_nums) * refresh_frequency)) * refresh_frequency)
+        self.tau = (np.ceil(cpu_cycles / ((f / self.service_nums**2) * refresh_frequency)) * refresh_frequency)
 
         # calculate the maxmium queue size of each service
         if task_queue_size is None:
@@ -73,7 +73,7 @@ class ACAgent(BaseAgent):
         # task queue
         self.task_queue = TaskQueue(service_num=service_nums, queue_size_max=self.task_queue_size, recycle=self.re_direct_queue)
 
-        self.tempoary_state_inf = None
+        self.temporary_state_inf = None
 
         self.cpu_cycles = cpu_cycles
         self.arrive_num = avg_arrive_nums
@@ -140,7 +140,7 @@ class ACAgent(BaseAgent):
             cur_cp[done_tk] = np.array([cp[i - 1] if i > 0 else np.inf for cp, i in zip(cps, task_size)])[done_tk]
             cur_rm[done_tk] = np.array([rm[i - 1] if i > 0 else 0 for rm, i in zip(rms, task_size)])[done_tk]
 
-            cpu_useage_ratio = cpu_useage_ratio + min_time_consum * rm_mask # calculate the cpu useage ratio
+            cpu_useage_ratio = cpu_useage_ratio + min_time_consum * rm_mask # calculate the cpu usage ratio
             memory_usage_ratio = np.where(memory_usage_ratio < cur_rm, cur_rm, memory_usage_ratio) # calculate the memory useage ratio
 
         # record the on-going task
@@ -155,36 +155,37 @@ class ACAgent(BaseAgent):
 
         I_loc = self.I_loc.numpy()
         p = self.p.detach().numpy()
+
         # delete overdue tasks
         self.task_queue.drop_with_key(func=lambda x, y: x > y, key="rd", y=self.tau / self.refresh_frequency)
-        self.tempoary_state_inf.drop_with_key(func=lambda x, y: x > y, key="rd", y=self.tau / self.refresh_frequency)
+        self.temporary_state_inf.drop_with_key(func=lambda x, y: x > y, key="rd", y=self.tau / self.refresh_frequency)
         self.re_direct_queue.drop_with_key(func=lambda x, y: x > y, key="rd", y=self.tau / self.refresh_frequency)
 
         # add unselected tasks into redirect queue
-        drop_nums = self.tempoary_state_inf.get_size() - I_loc
-        self.tempoary_state_inf.drop_task_(number=drop_nums, reverse=True, key="rd", sort=True)
+        drop_nums = self.temporary_state_inf.get_size() - I_loc
+        self.temporary_state_inf.drop_task_(number=drop_nums, reverse=True, key="rd", sort=True)
 
         # merger new task in process queue
-
-        self.task_queue.merger_task_queue(self.tempoary_state_inf, drop=True)
-        self.tempoary_state_inf.clean()
+        self.task_queue.merger_task_queue(self.temporary_state_inf, drop=True)
+        self.temporary_state_inf.clean()
 
         ## calculate the task latency ##
 
         # calculate the switch latency
-        SW = np.sum(self.task_queue.return_mean(key="rd")) * self.sw
+        SW = np.sum(self.re_direct_queue.return_mean(key="rd")) * self.sw
 
         # calculate the transmission latency
         TR = np.sum(self.task_queue.return_sum(key="dl") / self.tr)
 
         # calculate the calculation latency
-        arrive_ratio = np.array(self.task_queue.get_size()) / self.refresh_frequency
+        arrive_ratio = np.array(I_loc) / self.refresh_frequency
         service_ratio = ((self.f * p) / self.cpu_cycles)
         sojourn_time = service_ratio - arrive_ratio
 
-        # if service ratio below the arrive ratio, we use the overdue time to substitude sojourn time
-        sojourn_time = np.where(sojourn_time > 0, service_ratio,  3 / self.tau)[arrive_ratio > 0]
+        # if service ratio below the arriving ratio, we use the overdue time to substitute sojourn time
+        sojourn_time = np.where(sojourn_time > 0, service_ratio,  1 / (3 * self.tau))
         CT = np.sum(1 / sojourn_time)
+
 
         self.task_latency[0] = SW
         self.task_latency[1] = TR

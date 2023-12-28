@@ -16,13 +16,13 @@ class Buffer(Dataset):
         self.reward = deque(maxlen=buffer_size)
         self.action_prob = deque(maxlen=buffer_size)
         self.step = step
-        self.load_w = 1
+        self.load_w = 0
         self.task_latency_w = 1
 
     def add_data(self, action, action_prob, state, reward):
         reward[:, 0] = (reward[:, 0] - reward[:, 0].mean()) ** 2 * self.load_w
         reward[:, 1] = reward[:, 1] * self.task_latency_w
-        reward = reward.sum(dim=1, keepdims=True)
+        reward = -reward.sum(dim=1)
 
         self.action.appendleft(action)
         self.state.appendleft(state)
@@ -37,9 +37,9 @@ class Buffer(Dataset):
 
     def __getitem__(self, item):
         return (
-            torch.stack([self.action[item], self.action[item + self.step]], dim=0),
-            torch.stack([self.action_prob[item + i] for i in range(self.step)], dim=0).squeeze(-1),
-            torch.stack([self.state[item], self.state[item + self.step]], dim=0),
+            torch.concat([self.action[item], self.action[item + self.step]], dim=0),
+            torch.concat([self.action_prob[item + i] for i in range(self.step)], dim=0).squeeze(-1),
+            torch.concat([self.state[item], self.state[item + self.step]], dim=0),
             torch.stack([self.reward[item + i] for i in range(self.step)], dim=0).squeeze(-1),
         )
 

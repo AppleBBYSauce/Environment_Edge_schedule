@@ -118,10 +118,9 @@ class Actor(torch.nn.Module):
 
         action_parameters_mu = torch.stack(action_parameters_mu, dim=1)
         action_parameters_lnsigma = torch.stack(action_parameters_lnsigma, dim=1)
-        action_distribution = torch.distributions.Normal(loc=action_parameters_mu,
-                                                         scale=torch.sqrt(torch.exp(action_parameters_lnsigma)))
-        randn_action = torch.clip_(action_distribution.sample(), min=0, max=1)
-        action_log_probability = action_distribution.log_prob(randn_action)
+        normal_random = torch.randn(size=action_parameters_mu.shape, device=action_parameters_mu.device)
+        randn_action = torch.clip_((action_parameters_mu + normal_random) * torch.sqrt(torch.exp(action_parameters_lnsigma)).detach(), min=0, max=1)
+        action_log_probability = -(action_parameters_lnsigma / 2) - ((randn_action - action_parameters_mu)**2 / (2 * torch.exp(action_parameters_lnsigma))) + 5
         return randn_action, torch.einsum("ijk->i", action_log_probability)
 
     def constrain_action(self, task_nums, neighbor_nums, local_egde, actions):

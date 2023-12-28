@@ -119,7 +119,7 @@ class Env:
         observation = torch.concat([observation, new_tasks_size], dim=1).unsqueeze(0).float()
         action, action_prob, state, reward, done_task_nums = zip(
             *[d.act(s, observation[:, idx, :])[0] for idx, (d, s) in enumerate(zip(self.Devices, new_tasks))])
-        return torch.stack(action, dim=0),torch.stack(action_prob, dim=0) ,torch.stack(state, dim=0), torch.stack(
+        return torch.stack(action, dim=0), torch.stack(action_prob, dim=0), torch.stack(state, dim=0), torch.stack(
             reward, dim=0), np.sum(done_task_nums, axis=0)
 
     def get_states(self):
@@ -150,7 +150,7 @@ class Env:
                     edge_index[1] += list(choices)
 
         adj[edge_index[0], edge_index[1]] = 1
-        adj[edge_index[1], edge_index[0]] = 1
+        # adj[edge_index[1], edge_index[0]] = 1
 
         local_edges = []
         for i in range(total):
@@ -183,17 +183,19 @@ class Env:
             TD_ERROR[device.idx].extend(device.update_critic(data_s[device.idx]))
 
         # update the actor
-        device_optimizers = [[i, torch.optim.AdamW(params=i.MDDPGS.actor.parameters(), lr=i.lr)] for i in self.Devices]
+        device_optimizers = [[i, torch.optim.AdamW(params=i.MDDPGS.actor_update.parameters(), lr=i.lr)] for i in self.Devices]
         scaler = GradScaler()
         for data_each in range(len(data_s[0])):
             for device, opt in device_optimizers:
 
                 action_t = []
                 for i in device.local_edge[0].tolist():
-
                     action_i, _ = self.Devices[i].generate_action(observation=data_s[i][data_each][5],
-                                                             task_nums=data_s[i][data_each][4], update=False)
-                    action_t.append(torch.concat(action_i, dim=-1))
+                                                                  task_nums=data_s[i][data_each][4], update=True)
+                    action_i = torch.concat(action_i, dim=-1)
+                    # if i != device.idx:
+                    #     action_i = action_i.data
+                    action_t.append(action_i)
 
                 action_t = torch.stack(action_t, dim=1)
                 loss = device.actor_loss(action_t=action_t,
@@ -207,45 +209,51 @@ class Env:
                 if data_each % self.soft_update_step == 0:
                     for target_parameter, main_parameter in zip(device.MDDPGS.actor.parameters(),
                                                                 device.MDDPGS.actor_update.parameters()):
+
                         target_parameter.data.copy_(
-                            (1 - self.soft_update_weight) * main_parameter + self.soft_update_weight * target_parameter)
+                            self.soft_update_weight * main_parameter + (1 - self.soft_update_weight) * target_parameter)
                         if torch.isnan(target_parameter).any():
                             print("error")
 
         torch.cuda.empty_cache()
         for i in self.Devices:
             i.MDDPGS.to("cpu")
-            i.VAR *= i.temperature
+            i.MDDPGS.actor.magic_const = min(i.MDDPGS.actor.magic_const * i.MDDPGS.actor.magic_const_temperature, 15)
+            if i.VAR is not None:
+                i.VAR *= i.temperature
 
 
 if __name__ == '__main__':
 
     all_time = 20000
-    delta_t = 15
+    delta_t = 45
     refresh_frequency = 1
-    sw = 20
-    batch_size = 64
+    sw = 5
+    batch_size = 16
     gamma = 0.9
     soft_update_weight = 0.1
-    soft_update_step = 30
-    buffer_step = 3
-    buffer_size = 200
-    hidden_nums = 64
-    lr = 0.005
+    soft_update_step = 15
+    buffer_step = 6
+    buffer_size = 300
+    hidden_nums = 50
+    lr = 0.0005
 
-    cpu_cycles = [300, 1000]
-    max_run_memorys = [2 ** 10, 2 ** 10 * 2]
-    arrive_nums = [6, 2]
+    cpu_cycles = [300, 500, 1000]
+    max_run_memorys = [2 ** 10, 2 ** 10 * 2, 2 ** 10 * 3]
+    arrive_nums = [30, 15, 10]
     arrive_nums = [i * (refresh_frequency / delta_t) for i in arrive_nums]
-    data_nums = [50, 300]
-    service_nums = 2
+    data_nums = [50, 150, 300]
+    service_nums = 3
 
-    device_nums_level_1 = 5
-    device_nums_level_2 = 5
-    device_nums_level_3 = 5
-    link_nums = [[0, 1, 3],
-                 [3, 1, 3],
-                 [1, 2, 2]]
+    device_nums_level_1 = 3
+    device_nums_level_2 = 3
+    device_nums_level_3 = 3
+
+
+    link_nums = [[2, 3, 1],
+                 [3, 0, 1],
+                 [3, 0, 0]]
+
 
     num_nodes = [device_nums_level_1, device_nums_level_2, device_nums_level_3]
     adj, edge_index, local_edge = Env.graph_generate(num_nodes=num_nodes, num_links=link_nums)
@@ -253,12 +261,14 @@ if __name__ == '__main__':
     device_nums = device_nums_level_1 + device_nums_level_2 + device_nums_level_3
     f = [1000 for _ in range(device_nums_level_1)] + [5000 for _ in range(device_nums_level_2)] + [10000 for _ in range(
         device_nums_level_3)]
-    total_service = (np.sum(f) / 3) / cpu_cycles
 
     rho = [0.1 for _ in range(device_nums)]
     tr = [np.random.normal(loc=15000, scale=5000) for _ in range(device_nums)]
-    dm = [2 ** 10 * 2 for _ in range(device_nums_level_1)] + [2 ** 10 * 4 for _ in range(device_nums_level_2)] + [
-        2 ** 10 * 8 for _ in range(device_nums_level_3)]
+    dm = [2 ** 10 * 4 for _ in range(device_nums_level_1)] + [2 ** 10 * 8 for _ in range(device_nums_level_2)] + [
+        2 ** 10 * 16 for _ in range(device_nums_level_3)]
+
+    # f = f[::-1]
+    # dm = dm[::-1]
 
     e = Env(service_nums=service_nums, f=f, rho=rho, tr=tr, dm=dm, gamma=gamma,
             cpu_cycles=cpu_cycles, max_run_memorys=max_run_memorys, arrive_nums=arrive_nums, data_nums=data_nums,

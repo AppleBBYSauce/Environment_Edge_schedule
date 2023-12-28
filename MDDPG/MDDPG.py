@@ -8,6 +8,7 @@ class Critic(torch.nn.Module):
                  state_nums: int, node_nums: int, edge_index, drop_out: float = 0.1):
         super().__init__()
 
+
         self.mlp_state = torch.nn.Sequential(
             torch.nn.Dropout(drop_out),
             torch.nn.Linear(in_features=state_nums, out_features=hidden_nums),
@@ -22,19 +23,29 @@ class Critic(torch.nn.Module):
             torch.nn.GELU(),
         )
 
-        self.outer = torch.nn.Sequential(
+        self.A_nn = torch.nn.Sequential(
             torch.nn.Dropout(drop_out),
             torch.nn.Linear(in_features=2 * hidden_nums, out_features=hidden_nums),
             # torch.nn.BatchNorm1d(num_features=hidden_nums),
             torch.nn.GELU(),
             torch.nn.Linear(in_features=hidden_nums, out_features=output_nums))
 
+        self.V_nn = torch.nn.Sequential(
+            torch.nn.Dropout(drop_out),
+            torch.nn.Linear(in_features=hidden_nums, out_features=hidden_nums),
+            # torch.nn.BatchNorm1d(num_features=hidden_nums),
+            torch.nn.GELU(),
+            torch.nn.Linear(in_features=hidden_nums, out_features=output_nums)
+        )
+
     def forward(self, observations, actions, edge_index):
         B, N, H = observations.shape
-        h1 = self.mlp_action(actions.view(B, N, -1))
-        h2 = self.mlp_state(observations)
-        h = torch.sum(torch.concat([h1, h2], dim=2), dim=1).squeeze()
-        return self.outer(h)
+        h1 = self.mlp_action(actions.view(B, N, -1)).sum(dim=1)
+        h2 = self.mlp_state(observations).sum(dim=1)
+        h = torch.concat([h1, h2], dim=1).squeeze()
+        advantage = self.A_nn(h)
+        value = self.V_nn(h2)
+        return advantage + value
 
 
 class Actor(torch.nn.Module):
@@ -67,6 +78,8 @@ class Actor(torch.nn.Module):
         self.action_nums = len(freedom_degree)
         self.freedom_nums = freedom_degree[0]
         # self.action_nums = [[None, None] for _ in range(freedom_degree)]
+        self.magic_const = 1
+        self.magic_const_temperature = 1.1
 
     def forward(self, x, VAR=None):
         h = self.mlp_state(x)
@@ -78,7 +91,7 @@ class Actor(torch.nn.Module):
         action = torch.stack(action_parameters_mu, dim=1)
         if VAR is not None:
             normal_random = torch.randn(size=action.shape, device=self.device_flag.device)
-            action = (action + normal_random) * VAR
+            action = (action + normal_random * VAR)
         return torch.clip_(action, min=0, max=1)
 
     def constrain_action(self, task_nums, neighbor_nums, local_egde, actions):
@@ -121,12 +134,12 @@ class MDDPG(torch.nn.Module):
 
         if not update:
             actions = self.actor(observation, VAR)
-            actions_ = self.actor.constrain_action(actions=actions.detach(), task_nums=task_nums,
+            actions_ = self.actor.constrain_action(actions=actions.data, task_nums=task_nums,
                                                   neighbor_nums=self.local_edge.shape[1],
                                                   local_egde=self.local_edge)
         else:
             actions = self.actor_update(observation, VAR)
-            actions_ = self.actor_update.constrain_action(actions=actions.detach(), task_nums=task_nums,
+            actions_ = self.actor_update.constrain_action(actions=actions.data, task_nums=task_nums,
                                                          neighbor_nums=self.local_edge.shape[1],
                                                          local_egde=self.local_edge)
         return [actions[:, i, :] for i in range(3)], actions_
@@ -139,7 +152,7 @@ class MDDPG(torch.nn.Module):
         return self.critic_update(observation, actions, self.edge_index)
 
     def get_target(self, observation, actions):
-        return self.critic(observation, actions, self.edge_index)
+        return torch.clip_(self.critic(observation, actions, self.edge_index), max=0)
 
 
 if __name__ == '__main__':

@@ -58,7 +58,7 @@ class Services:
 
         self.data_num_generator = lambda x, size: np.array([x] * size)  # Generates an array of data_nums
 
-        self.cpu_cycle_generator = np.random.exponential  # Generates exponentially-distributed random numbers
+        self.cpu_cycle_generator = np.random.normal  # Generates exponentially-distributed random numbers
 
     def generate_new_services(self, device_nums: int = None):
         # Generate new services with random task parameters
@@ -77,7 +77,7 @@ class Services:
               i in range(device_nums)]
         # dl: the data num for each task, generated using the provided data_nums
 
-        cp = [[(self.cpu_cycle_generator(num, size) + 1).astype(int).tolist() for num, size in
+        cp = [[(self.cpu_cycle_generator(loc=num, size=size) + 1).astype(int).tolist() for num, size in
                zip(self.cpu_cycles, wt[i])]
               for i in range(device_nums)]
         # cp: the CPU cycle for each task, generated using exponential distribution

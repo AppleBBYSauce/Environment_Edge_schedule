@@ -38,7 +38,10 @@ class MDDPGAgent(ACAgent):
         self.lr = lr
         self.step = step
         self.VAR = 1
-        self.temperature = 0.95
+        self.temperature = 1.01
+
+
+
         self.MDDPGS = MDDPG(state_nums=state_nums, freedom_nums=freedom_nums, hidden_nums=hidden_nums, gamma=gamma,
                             step=step,
                             agents_nums=agents_nums, edge_index=self.local_edge_index, local_edge=local_edge)
@@ -51,12 +54,11 @@ class MDDPGAgent(ACAgent):
 
     def act(self, new_task_queue: TaskQueue, observation):
 
-        self.tempoary_state_inf: TaskQueue = new_task_queue
+        self.temporary_state_inf: TaskQueue = new_task_queue
 
-        self.tempoary_state_inf.set_recycle(self.re_direct_queue)  # set re_direct queue as the recycle station
+        self.temporary_state_inf.set_recycle(self.re_direct_queue)  # set re_direct queue as the recycle station
 
-        action, action_constrain = self.generate_action(observation=observation,
-                                                                      task_nums=new_task_queue.queue_size)
+        action, action_constrain = self.generate_action(observation=observation, task_nums=new_task_queue.queue_size)
 
         p, I_loc, I_mig = action
         self.p, self.I_loc, self.I_mig = action_constrain
@@ -94,7 +96,7 @@ class MDDPGAgent(ACAgent):
     def return_states(self):
         return torch.concat([
             torch.tensor(self.task_queue.get_size()),
-            torch.tensor(self.p),
+            self.p.data,
             torch.tensor(self.task_queue.return_mean()).view(-1),
             torch.tensor(self.task_queue.return_std()).view(-1),
         ], dim=0)
@@ -122,8 +124,8 @@ class MDDPGAgent(ACAgent):
 
             with autocast():
                 reward = torch.sum(self.MDDPGS.gamma * reward, dim=-1)
-                Q_pre = self.MDDPGS.get_pre(observation=state_t, actions=action_t.detach())
-                Q_target = self.MDDPGS.get_target(observation=state_t_plus, actions=action_t_plus.detach()) + reward
+                Q_pre = self.MDDPGS.get_pre(observation=state_t, actions=action_t.data)
+                Q_target = self.MDDPGS.get_target(observation=state_t_plus, actions=action_t_plus.data) + reward
                 TD_Error = Q_target - Q_pre
                 TD_recorder.append(TD_Error)
 
@@ -135,7 +137,7 @@ class MDDPGAgent(ACAgent):
                 for target_parameter, main_parameter in zip(self.MDDPGS.critic.parameters(),
                                                             self.MDDPGS.critic_update.parameters()):
                     target_parameter.data.copy_(
-                        (1 - self.soft_update_weight) * main_parameter + self.soft_update_weight * target_parameter)
+                        self.soft_update_weight * main_parameter + (1 - self.soft_update_weight )* target_parameter)
 
         for target_parameter, main_parameter in zip(self.MDDPGS.critic.parameters(),
                                                     self.MDDPGS.critic_update.parameters()):
@@ -146,10 +148,8 @@ class MDDPGAgent(ACAgent):
         return TD_recorder
 
     def actor_loss(self, state_t, action_t):
-        action_t[:, 1:, :] = action_t[:, 1:, :].detach()
         with autocast():
-            loss = -torch.pow(self.MDDPGS.get_target(observation=state_t, actions=action_t), 2).mean()
-        return loss
+            return self.MDDPGS.get_target(observation=state_t, actions=action_t).mean()
 
 
 if __name__ == '__main__':

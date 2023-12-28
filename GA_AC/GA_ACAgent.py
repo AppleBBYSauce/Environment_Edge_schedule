@@ -110,11 +110,11 @@ class GAACAgent(ACAgent):
         for e, data_each in enumerate(data):
 
             action, action_probs, state, reward, task_nums, self_state = data_each
-            state_t = state[:, 0, :, :]
-            state_t_plus = state[:, 1, :, :]
-            action_t = action[:, 0, :, :]
-            action_t_plus = action[:, 1, :, :]
-            reward = reward[:, :-1]
+            state_t = state[:, 0, :, :].detach()
+            state_t_plus = state[:, 1, :, :].detach()
+            action_t = action[:, 0, :, :].detach()
+            action_t_plus = action[:, 1, :, :].detach()
+            reward = reward[:, :-1].detach()
 
             with autocast():
                 reward = torch.sum(self.GA_AC.gamma * reward, dim=-1)
@@ -124,7 +124,7 @@ class GAACAgent(ACAgent):
                 TD_recorder.append(TD_Error)
 
             optimizer.zero_grad()
-            scaler.scale(torch.pow(TD_Error,2).mean()).backward()
+            scaler.scale(TD_Error.mean()).backward()
             scaler.step(optimizer)
             scaler.update()
 

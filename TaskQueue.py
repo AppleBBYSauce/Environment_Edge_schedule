@@ -115,7 +115,7 @@ class TaskQueue:
             # Iterate over each service and calculate the mean for each key
             return np.array([
                 np.nanmean(self.task_queue[l], axis=1) if self.queue_size[l] > 0 else np.array(
-                    [1e-8 for _ in range(len(self.idx2key))])
+                    [1e-5 for _ in range(len(self.idx2key))])
                 for l in range(self.service_num)
             ])
         else:
@@ -123,7 +123,7 @@ class TaskQueue:
 
             # Iterate over each service and calculate the mean for the specified key
             return np.array([
-                np.nanmean(self.task_queue[l][self.idx2key[key], :]) if self.queue_size[l] > 0 else 1e-8
+                np.nanmean(self.task_queue[l][self.idx2key[key], :]) if self.queue_size[l] > 0 else 1e-5
                 for l in range(self.service_num)
             ])
 
