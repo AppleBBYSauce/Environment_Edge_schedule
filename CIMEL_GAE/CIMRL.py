@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from MultiMLP import MMLP
 from MultiTransformer import MMTs
-from torch.distributions import Normal
+from MultiAgentTransformer import MMTAs
 from torch_scatter import scatter_mean, scatter_add
 from GCN import GCN
 from ChI import Choquet_Integral
@@ -13,7 +13,7 @@ CONST = (2 * torch.pi) ** 0.5
 class Critic(torch.nn.Module):
 
     def __init__(self, hidden_nums: int, output_nums: int, neighbor_nums: list[int],
-                 node_nums: int, drop_out: float = 0.0, heads: int = 1):
+                 node_nums: int, drop_out: float = 0.0, heads: int = 3):
         super().__init__()
 
         self.heads = heads
@@ -31,7 +31,7 @@ class Critic(torch.nn.Module):
         )
 
         self.ChIs = torch.nn.ModuleList([
-            Choquet_Integral(neighbor_node_nums=nns - 1, dropout=drop_out, hidden=1, heads=heads)
+            Choquet_Integral(neighbor_node_nums=nns - 1, dropout=drop_out, heads=heads)
             for nns in neighbor_nums
         ])
 
@@ -89,11 +89,11 @@ class Actor(torch.nn.Module):
             x_.append(mlp(x))
         x = torch.stack(x_, dim=2)
 
-        # if shapley_index is None:
-        #     x = scatter_mean(x[:, edge_index[1], :, :].data, index=edge_index[0], dim=1, dim_size=self.node_nums)
-        # else:
-        #     x = scatter_add(x[:, edge_index[1], :, :] * shapley_index, index=edge_index[0], dim=1,
-        #                     dim_size=self.node_nums)
+        if shapley_index is None:
+            x = scatter_mean(x[:, edge_index[1], :, :].data + x[:, edge_index[0], :, :], index=edge_index[0], dim=1, dim_size=self.node_nums)
+        else:
+            x = scatter_add(x[:, edge_index[1], :, :].data * shapley_index, index=edge_index[0], dim=1,
+                            dim_size=self.node_nums) + x[:, edge_index[0], :, :]
 
         x = self.transformer(x, x, x)
         action_parameters_mu = []
@@ -101,24 +101,23 @@ class Actor(torch.nn.Module):
 
         for idx, (mu, sigma) in enumerate(zip(self.decide_mu, self.decide_In_sigma)):
             action_parameters_mu.append(mu(x[:, :, idx, :]))
-            # action_parameter_In_sigma.append(torch.tanh(sigma(h_I[idx])))
+            action_parameter_In_sigma.append(sigma(x[:, :, idx, :]))
 
         action_mu = torch.stack(action_parameters_mu, dim=2)
-        # action_In_sigma = torch.stack(action_parameter_In_sigma, dim=2)
+        action_In_sigma = torch.stack(action_parameter_In_sigma, dim=2)
 
-        # sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * torch.exp(
-        #     action_In_sigma))
+        sample_action = (action_mu +
+                         torch.randn(size=action_mu.shape, device=action_mu.device) * torch.pow(torch.exp(action_In_sigma), 0.5))
 
-        sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * self.VAR)
+        # sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * self.VAR)
 
-        # sample_In_prob = (-action_In_sigma / 2) - ((sample_action - action_mu) ** 2 /
-        #                                            (2 * torch.exp(action_In_sigma)))
+        sample_In_prob = (-action_In_sigma / 2) - ((sample_action - action_mu) ** 2 /
+                                                   (2 * torch.exp(action_In_sigma)))
+        # from torch.distributions import MultivariateNormal
+        # dist = MultivariateNormal(loc=action_mu.view(1, 9, -1), covariance_matrix=torch.diag_embed(torch.pow(torch.exp(action_In_sigma.view(1, 9,-1)),0.5)))
+        # dist.entropy()
 
-        # dist = Normal(loc=sample_action, scale=self.VAR**0.5)
-
-        sample_In_prob = -torch.log(CONST * self.VAR) - (((sample_action - action_mu) ** 2) / (2 * self.VAR**2))
-
-        # sample_entropy = -sample_In_prob.mean(-1).mean(-1)
+        sample_entropy = 0.5 * (torch.log(2 * torch.pi * torch.e * torch.exp(action_In_sigma)).sum(dim=[-2, -1]))
 
         sample_action[:, :, 0, :] = torch.softmax(torch.tanh(sample_action[:, :, 0, :]), dim=2)
 
@@ -126,7 +125,7 @@ class Actor(torch.nn.Module):
 
         sample_action[:, :, 2, :] = torch.tanh(sample_action[:, :, 2, :])
 
-        return sample_action, sample_In_prob.sum(-1).sum(-1)
+        return sample_action, sample_In_prob.sum(-1).sum(-1), sample_entropy
 
     def constrain_action(self, task_nums, neighbor_nums, local_edges, actions):
         device = next(self.parameters()).device
@@ -208,10 +207,10 @@ class ChIMRL(torch.nn.Module):
                 observation = observation.to(self.gamma.device)
                 task_nums = task_nums.to(self.gamma.device)
             observation = self.global_gnn_state(observation).data
-            action, action_prob = self.actor(x=observation, edge_index=self.edge_index)
+            action, action_prob, action_entropy = self.actor(x=observation, edge_index=self.edge_index)
         else:
             observation = self.global_gnn_update_state(observation).data
-            action, action_prob = self.actor_update(x=observation, edge_index=self.edge_index)
+            action, action_prob, action_entropy = self.actor_update(x=observation, edge_index=self.edge_index)
 
         if task_nums is not None:
 
@@ -221,7 +220,7 @@ class ChIMRL(torch.nn.Module):
         else:
             actions_ = None
         B, M, _, _ = action.shape
-        return action.view(B, M, -1), action_prob, actions_
+        return action.view(B, M, -1), action_prob, action_entropy, actions_
 
     def get_pre(self, observation, action, update=True):
         observation = self.global_gnn_update_state(x=observation)
@@ -242,22 +241,27 @@ class ChIMRL(torch.nn.Module):
         std = torch.where(std == 0, 1, std)
         return (x - mean) / std
 
-    def return_ChI_Q(self, action_old, states, reward, update_actor: bool = False, lamb: float = 0.95):
-
+    def return_ChI_Q(self, action_old, states, reward, update_actor: bool = False, lamb: float = 0.95, alpha:float = 0.05):
         GAE = [0]
-        for t in range(self.step - 1):
+        for t in range(self.step):
+
             state = states[:, t, :, :]
-            state_plus = states[:, t + 1, :, :]
+
             if update_actor:
-                action, _, _ = self.generate_act(observation=state, update=True)
+                action, _, action_entropy, _ = self.generate_act(observation=state, update=True)
             else:
                 action = action_old[:, t, :, :]
-            action_plus = action_old[:, t + 1, :, :]
+                action_entropy = 0
             Q, _ = self.get_pre(observation=state, action=action)
-            Q = self.gamma ** t * Q
-            _, V = self.get_target(observation=state_plus, action=action_plus)
-            V_plus = self.gamma ** (t + 1) * (V + reward[:, t, :])
-            A = ((V_plus - Q) + GAE[-1]) * lamb ** t
+            Q = (self.gamma ** t) * Q
+            if t == self.step - 1:
+                V_plus = (self.gamma ** (t + 1)) * reward[:, t, :]
+            else:
+                action_plus = action_old[:, t + 1, :, :]
+                state_plus = states[:, t + 1, :, :]
+                _, V = self.get_target(observation=state_plus, action=action_plus)
+                V_plus = (self.gamma ** (t + 1)) * (V + reward[:, t, :])
+            A = ((V_plus - Q) + GAE[-1]) * (lamb ** t) - action_entropy * alpha
             GAE.append(A)
         GAE = sum(GAE) * (1 - lamb)
         return GAE

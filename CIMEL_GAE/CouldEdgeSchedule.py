@@ -59,17 +59,19 @@ class Env:
         self.lr_critic = lr_critic
         self.lr_actor = lr_actor
         self.opt_critic = torch.optim.Adam(params=self.nn.return_critic_update_parameters(), lr=self.lr_critic,
-                                           weight_decay=1e-4)
+                                           weight_decay=1e-3)
         self.opt_actor = torch.optim.AdamW(params=self.nn.return_actor_update_parameters(), lr=self.lr_actor,
-                                           weight_decay=1e-6)
-        self.scheduler_critic = torch.optim.lr_scheduler.StepLR(optimizer=self.opt_critic, step_size=50, gamma=0.98)
-        self.scheduler_actor = torch.optim.lr_scheduler.StepLR(optimizer=self.opt_actor, step_size=50, gamma=0.98)
+                                           weight_decay=1e-5)
+        self.scheduler_critic = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=self.opt_critic, T_max=100, eta_min=1e-4)
+        self.scheduler_actor = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=self.opt_actor, T_max=100, eta_min=1e-4)
 
         # action, state, reward
         self.buffer = Buffer(step=buffer_step, buffer_size=buffer_size)
         self.round_reward = np.empty(shape=(1, 2))
         self.update_round = 0
         self.ultimate_record = []
+
+        self.recorder = open("result.txt", "w+")
 
     def step(self):
 
@@ -98,11 +100,11 @@ class Env:
             loss_critic, loss_actor = self.update(self.update_round)
             self.round_count = 0
             self.update_round += 1
-            print(
-                f"load ratio std: {self.round_reward[:, 0].std()}, task latency mean: {np.mean(self.round_reward[:, 1])},"
+            f = (f"load ratio std: {self.round_reward[:, 0].std()}, task latency mean: {np.mean(self.round_reward[:, 1])},"
                 f"complete ratio: {self.done_tasks_num / self.total_task_nums}, "
-                f"critic loss: {loss_critic}, actor loss: {loss_actor}"
-            )
+                f"critic loss: {loss_critic}, actor loss: {loss_actor}")
+            self.recorder.write(f+"\n")
+            print(f)
             self.round_reward = np.empty(shape=(1, 2))
             self.total_task_nums *= 0
             self.done_tasks_num *= 0
@@ -140,7 +142,7 @@ class Env:
 
         self.Devices.temporary_state_inf = new_tasks
 
-        actions, action_probs, actions_constrain = self.nn.generate_act(observation=observation,
+        actions, action_probs, _,actions_constrain = self.nn.generate_act(observation=observation,
                                                                         task_nums=new_tasks_size, update=False)
 
         p_multiple, I_mig_multiple, I_loc_multiple = actions_constrain
@@ -148,7 +150,8 @@ class Env:
         p_multiple, I_mig_multiple, I_loc_multiple = p_multiple.numpy(), I_mig_multiple.numpy(), I_loc_multiple.numpy()
         self.Devices.I_mig = I_mig_multiple
         self.Devices.I_loc = I_loc_multiple
-        SW, TR, CT = self.Devices.pre_process(I_mig_multiple=I_mig_multiple, p_multiple=p_multiple,
+        SW, TR, CT = self.Devices.pre_process(I_mig_multiple=I_mig_multiple,
+                                              p_multiple=p_multiple,
                                               I_loc_multiple=I_loc_multiple)
         done_task_queue, cpu_usage_ratio, memory_usage_ratio = self.Devices.process_cur(p_multiple=p_multiple)
         load_ratio, tasks_latency = self.Devices.process_post(SW=SW, TR=TR, CT=CT, cpu_usage_ratios=cpu_usage_ratio,
@@ -205,13 +208,13 @@ class Env:
         for counter, data in enumerate(self.buffer.BufferLoader(self.batch_size)):
             actions, _, states, rewards = data
             action = actions.to(cmp_device).data
-            reward = rewards[:, :-1, :].to(cmp_device)
+            reward = rewards.to(cmp_device)
             states = states.to(cmp_device)
             with autocast():
                 A = self.nn.return_ChI_Q(states=states,
                                          reward=reward,
                                          action_old=action)
-                loss = torch.nanmean(torch.square(A), dim=0).nansum()
+                loss = torch.nanmean(torch.abs(A), dim=0).nansum()
 
             loss_critic.append(loss.item())
             self.opt_critic.zero_grad()
@@ -224,14 +227,14 @@ class Env:
         self.nn.soft_update(flag=False, soft_update_weight=self.soft_update_weight)
         self.scheduler_critic.step()
 
-        if step > 100:
+        if step > 200:
             # update the actor
             scaler = GradScaler()
             for counter, data in enumerate(self.buffer.BufferLoader(self.batch_size)):
                 actions, action_prob, states, rewards = data
                 states = states.to(cmp_device)
                 action = actions.to(cmp_device).data
-                reward = rewards[:, :-1, :].to(cmp_device)
+                reward = rewards.to(cmp_device)
                 state = states[:, 0, :, :]
                 with autocast():
                     # action, _, _ = self.nn.generate_act(observation=state, update=True)
@@ -264,7 +267,7 @@ class Env:
 
 
 if __name__ == '__main__':
-    all_time = 300000
+    all_time = 500000
     delta_t = 45
     refresh_frequency = 1
     sw = 1
@@ -272,11 +275,11 @@ if __name__ == '__main__':
     gamma = 0.9
     soft_update_weight = 0.15
     soft_update_step = 20
-    buffer_step = 5
-    buffer_size = 200 + buffer_step
-    hidden_nums = 200
-    lr_critic = 0.005
-    lr_actor = 0.005
+    buffer_step = 4
+    buffer_size = 150 + buffer_step
+    hidden_nums = 128
+    lr_critic = 0.01
+    lr_actor = 0.01
 
     cpu_cycles = [300, 500, 1000]
     max_run_memorys = [2 ** 10, 2 ** 10 * 2, 2 ** 10 * 3]
@@ -331,7 +334,7 @@ if __name__ == '__main__':
             cpu_cycles=cpu_cycles, max_run_memorys=max_run_memorys, arrive_nums=arrive_nums, data_nums=data_nums,
             device_nums=device_nums, sw=sw, refresh_frequency=refresh_frequency, delta_t=delta_t,
             lr_critic=lr_critic, lr_actor=lr_actor,
-            state_nums=12 * service_nums, freedom_nums=[service_nums for _ in range(3)], hidden_nums=hidden_nums,
+            state_nums=20 * service_nums, freedom_nums=[service_nums for _ in range(3)], hidden_nums=hidden_nums,
             soft_update_step=soft_update_step, soft_update_weight=soft_update_weight,
             edge_index=edge_index, local_edge=local_edge, batch_size=batch_size, buffer_step=buffer_step,
             buffer_size=buffer_size)
@@ -342,3 +345,4 @@ if __name__ == '__main__':
     for i in range(all_time):
         e.step()
     print(time.time() - start)
+    e.recorder.close()

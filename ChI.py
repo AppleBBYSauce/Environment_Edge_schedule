@@ -4,15 +4,15 @@ from math import ceil
 
 
 class Choquet_Integral(torch.nn.Module):
-    def __init__(self, heads: int, neighbor_node_nums: int, hidden: int, dropout: float):
+    def __init__(self, heads: int, neighbor_node_nums: int, dropout: float):
         super().__init__()
         self.heads = heads
         self.neighbors_node_nums = neighbor_node_nums
         self.var_num = 2 ** self.neighbors_node_nums - 1
         self.FM = torch.ones(size=(self.var_num, heads), requires_grad=True) / self.neighbors_node_nums
-        self.norm = torch.nn.Sequential(torch.nn.BatchNorm1d(num_features=heads),
-                                        torch.nn.PReLU(),
-                                        torch.nn.Dropout(dropout))
+        # self.norm = torch.nn.Sequential(torch.nn.BatchNorm1d(num_features=heads),
+        #                                 torch.nn.PReLU(),
+        #                                 torch.nn.Dropout(dropout))
         self.act = torch.nn.PReLU()
         self.mobius_index = []
         self.source_index, self.source_index_mobius, self.sub_source_for_draw = self.get_source_index(
@@ -21,7 +21,7 @@ class Choquet_Integral(torch.nn.Module):
         self.S = torch.nn.Parameter(self.generate_shapley_transformer(), requires_grad=False)
         self.mobius_index = torch.tensor(self.mobius_index)
         self.standardize()
-        FM_noise = torch.randn(size=(self.var_num, hidden)) + 5e-2
+        FM_noise = torch.randn(size=(self.var_num, heads)) + 5e-2
         self.FM = torch.nn.Parameter(self.FM + FM_noise)
         # self.draw_hasse_diagram()
 
@@ -42,23 +42,21 @@ class Choquet_Integral(torch.nn.Module):
         return source_index, source_index_mobius, sub_source_for_draw
 
     def generate_mobius_transformer(self):
-        def f(a, b):
-            tmp_a = 0
-            while a:
-                tmp_a += a & 1
-                a >>= 1
-            tmp_b = 0
-            while b:
-                tmp_b += b & 1
-                b >>= 1
-            return -1 ** (a - b)
+
+        def count_ones(n):
+
+            count = 0
+            while n:
+                n &= (n - 1)  # Clears the rightmost 1 bit
+                count += 1
+            return count
 
         M = torch.zeros(size=(2 ** self.neighbors_node_nums - 1, 2 ** self.neighbors_node_nums - 1),
                         requires_grad=False)
         for i in range(1, 2 ** self.neighbors_node_nums):
             for j in range(1, i + 1):
                 if i & j == j:  # j ⊆ i
-                    M[i - 1][j - 1] = f(i, j)
+                    M[i - 1][j - 1] = pow(-1, (count_ones(i) - count_ones(j)))
         return M
 
     def generate_shapley_transformer(self):
@@ -92,7 +90,6 @@ class Choquet_Integral(torch.nn.Module):
 
     @torch.no_grad()
     def standardize(self):
-        self.FM = torch.where(self.FM < 0, 0, self.FM)
         for idx, subsetIdx in enumerate(self.source_index):
             if len(subsetIdx) > 1:
                 maxVal, _ = torch.max(self.FM[subsetIdx, :], dim=0)
@@ -100,28 +97,26 @@ class Choquet_Integral(torch.nn.Module):
                             torch.add(self.FM[idx, :], maxVal),
                             self.FM[idx, :],
                             out=self.FM[idx, :])
-        self.FM = torch.where(self.FM > 1, 1, self.FM)
 
     def forward(self, x):
         N, S, D = x.shape
+        FM = self.act(self.FM)
         x_sort, sortIdx = torch.sort(x, dim=1, descending=True)
         x_sort = torch.cat((x_sort, torch.zeros(N, 1, D, device=x.device)), -2)
         x_sort = (x_sort[:, :-1, :] - x_sort[:, 1:, :])
         sortIdx = torch.cumsum(torch.pow(2, sortIdx), dim=1) - 1
-        FM_ = self.FM[sortIdx.view(-1), :].view(N, S, D, self.heads)
-        x = torch.einsum("bsn,bsnh->bhn", x_sort, FM_)
-        if not self.concat:
-            x = torch.sum(x, dim=-2, keepdim=True)
-        return self.norm(x)
+        FM = FM[sortIdx, :]
+        x = (FM * x_sort.unsqueeze(-1)).sum(1).squeeze(-1)
+        return x
 
     def forward_mobius(self, x):
         # FM = torch.clamp(input=self.FM, min=0)
-        B = x.size(0)
         FM = self.act(self.FM)
-        mobius_FM = torch.einsum("sh,bs->sh", self.FM, self.M)
+        mobius_FM = torch.matmul(self.M, FM)
         xf = torch.min(x[:, self.mobius_index, :], dim=-2)[0]
-        xf = torch.einsum("bsd,sh->bhd", xf, mobius_FM).view(B, self.heads)
-        return self.norm(xf) if B > 1 else xf
+        xf = (xf * mobius_FM).sum(1)
+        # xf = torch.einsum("bsd,sh->bhd", xf, mobius_FM).view(B, self.heads)
+        return xf
 
     def shapley_value(self):
         from scipy.special import comb
@@ -171,11 +166,15 @@ class Choquet_Integral(torch.nn.Module):
 
 
 if __name__ == '__main__':
+
     device = "cpu"
-    Neighbor_node_nums = 7
+    Neighbor_node_nums = 3
     N_hidden = 1
-    m = Choquet_Integral(neighbor_node_nums=Neighbor_node_nums, dropout=0.3, hidden=1, heads=1).to(device)
+    m = Choquet_Integral(neighbor_node_nums=Neighbor_node_nums, dropout=0.3, heads=1).to(device)
+    m.FM = torch.nn.Parameter(torch.tensor([[0.45,0.45,0.6,0.3,0.9,0.9,1]]).T)
     for i in range(500):
-        x = torch.randn(64, Neighbor_node_nums, N_hidden)
+        x = torch.tensor([[[18],[16],[10]], [[10],[12],[18]]]).float()
         x = x.to(device)
-        m.forward_mobius(x)
+        y1 = m.forward_mobius(x)
+        y2 = m(x)
+        p = 0

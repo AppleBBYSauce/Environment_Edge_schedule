@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from MultiMLP import MMLP
 from MultiTransformer import MMTs
+from MultiAgentTransformer import MMTAs
 from torch_scatter import scatter_mean, scatter_add
 from GCN import GCN
 from ChI import Choquet_Integral
@@ -30,7 +31,7 @@ class Critic(torch.nn.Module):
         )
 
         self.ChIs = torch.nn.ModuleList([
-            Choquet_Integral(neighbor_node_nums=nns - 1, dropout=drop_out, hidden=1, heads=heads)
+            Choquet_Integral(neighbor_node_nums=nns - 1, dropout=drop_out, heads=heads)
             for nns in neighbor_nums
         ])
 
@@ -38,11 +39,15 @@ class Critic(torch.nn.Module):
         V = self.V_nn(observation)
         A = self.A_nn(torch.concat([observation, action], dim=-1))
         Q_neighbors = A + V
+        # return Q_neighbors.squeeze(-1), V.squeeze(-1)
         ChI_Q = []
+        ChI_V = []
         for ChI, local_edge in zip(self.ChIs, local_edges):
             Q_neighbor = Q_neighbors[:, local_edge[0, 1:], :].data
             ChI_Q.append((ChI.forward_mobius(Q_neighbor) + Q_neighbors[:, local_edge[0, 0], :]).mean(dim=1))
-        return torch.stack(ChI_Q, dim=1)
+            V_neighbor = V[:, local_edge[0, 1:], :].data
+            ChI_V.append((ChI.forward_mobius(V_neighbor) + V[:, local_edge[0, 0], :]).mean(dim=1))
+        return torch.stack(ChI_Q, dim=1), torch.stack(ChI_V, dim=1)
 
     def return_shapley_values(self):
         return [chi.generate_shapley_value() for chi in self.ChIs]
@@ -58,7 +63,8 @@ class Actor(torch.nn.Module):
             freedom_degree
         ])
 
-        self.transformer = MMTs(multi_nums=node_nums, hidden_nums=hidden_nums, heads=4, dropout=drop_out)
+        self.transformer = torch.nn.ModuleList(
+            [MMTs(multi_nums=node_nums, hidden_nums=hidden_nums, heads=3, dropout=drop_out) for i in freedom_degree])
 
         self.decide_mu = torch.nn.ModuleList([
             MMLP(input_num=hidden_nums, out_num=i, multi_num=node_nums, dropout=drop_out) for i in freedom_degree
@@ -73,43 +79,54 @@ class Actor(torch.nn.Module):
         self.node_nums = node_nums
         self.magic_const = 1
         self.magic_const_temperature = 1.1
-        self.VAR = torch.nn.Parameter(torch.ones(size=(node_nums, self.action_nums, self.freedom_nums)) * 1,
+        self.VAR = torch.nn.Parameter(torch.ones(size=(node_nums, self.action_nums, self.freedom_nums)) * 1.5,
                                       requires_grad=False)
         self.temperature = 0.99999
 
     def forward(self, x, edge_index, shapley_index=None):
 
+
+
+        if shapley_index is None:
+            x = scatter_mean(x[:, edge_index[1], :].data + x[:, edge_index[0], :], index=edge_index[0], dim=1,
+                             dim_size=self.node_nums)
+        else:
+            x = scatter_add(x[:, edge_index[1], :, :].data * shapley_index, index=edge_index[0], dim=1,
+                            dim_size=self.node_nums) + x[:, edge_index[0], :, :]
+
         x_ = []
         for mlp in self.mlp:
             x_.append(mlp(x))
-        x = torch.stack(x_, dim=2)
 
-        if shapley_index is None:
-            x = scatter_add(x[:, edge_index[1], :, :], index=edge_index[0], dim=1, dim_size=self.node_nums)
-        else:
-            x = scatter_add(x[:, edge_index[1], :, :] * shapley_index, index=edge_index[0], dim=1,
-                            dim_size=self.node_nums)
+        x_trans = []
+        for idx, ts_nn in enumerate(self.transformer):
+            x_detach = [i.data if j != idx else i for j, i in enumerate(x_)]
+            x_detach = torch.stack(x_detach, dim=2)
+            x_trans.append(ts_nn(x_detach, x_detach, x_detach)[:, :, idx, :])
 
-        x = self.transformer(x, x, x)
         action_parameters_mu = []
         action_parameter_In_sigma = []
 
-        for idx, (mu, sigma) in enumerate(zip(self.decide_mu, self.decide_In_sigma)):
-            action_parameters_mu.append(mu(x[:, :, idx, :]))
-            action_parameter_In_sigma.append(sigma(x[:, :, idx, :]))
+        for idx, (mu, sigma, x_tran) in enumerate(zip(self.decide_mu, self.decide_In_sigma, x_trans)):
+            action_parameters_mu.append(mu(x_tran))
+            action_parameter_In_sigma.append(sigma(x_tran))
 
         action_mu = torch.stack(action_parameters_mu, dim=2)
         action_In_sigma = torch.stack(action_parameter_In_sigma, dim=2)
 
         sample_action = (action_mu +
-                         torch.randn(size=action_mu.shape, device=action_mu.device) * torch.exp(action_In_sigma)**0.5)
+                         torch.randn(size=action_mu.shape, device=action_mu.device) * torch.pow(
+                    torch.exp(action_In_sigma), 0.5))
 
         # sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * self.VAR)
 
         sample_In_prob = (-action_In_sigma / 2) - ((sample_action - action_mu) ** 2 /
                                                    (2 * torch.exp(action_In_sigma)))
+        # from torch.distributions import MultivariateNormal
+        # dist = MultivariateNormal(loc=action_mu.view(1, 9, -1), covariance_matrix=torch.diag_embed(torch.pow(torch.exp(action_In_sigma.view(1, 9,-1)),0.5)))
+        # dist.entropy()
 
-        # sample_In_prob = -torch.log(CONST * self.VAR) - (((sample_action - action_mu) ** 2) / (2 * self.VAR ** 2))
+        sample_entropy = 0.5 * (torch.log(2 * torch.pi * torch.e * torch.exp(action_In_sigma)).sum(dim=[-2, -1]))
 
         sample_action[:, :, 0, :] = torch.softmax(torch.tanh(sample_action[:, :, 0, :]), dim=2)
 
@@ -117,7 +134,7 @@ class Actor(torch.nn.Module):
 
         sample_action[:, :, 2, :] = torch.tanh(sample_action[:, :, 2, :])
 
-        return sample_action, sample_In_prob.sum(-1).sum(-1)
+        return sample_action, sample_In_prob.sum(-1).sum(-1), sample_entropy
 
     def constrain_action(self, task_nums, neighbor_nums, local_edges, actions):
         device = next(self.parameters()).device
@@ -140,16 +157,15 @@ class ChIMRL(torch.nn.Module):
                  freedom_nums: list,
                  hidden_nums: int,
                  agents_nums: int,
-                 action_nums:int,
+                 action_nums: int,
                  local_edges,
                  edge_index,
                  gamma: float, step: int):
         super().__init__()
 
-        gamma = torch.tensor([[gamma ** i] for i in range(step)])
+        self.gamma = gamma
         self.neighbor_nums = [i.shape[1] for i in local_edges]
         self.register_buffer("edge_index", edge_index)
-        self.register_buffer("gamma", gamma)
         self.step = step
         self.local_edges = local_edges
 
@@ -158,7 +174,7 @@ class ChIMRL(torch.nn.Module):
                                            out_num=hidden_nums, layer=2,
                                            node_num=len(local_edges),
                                            edge_index=edge_index,
-                                           dropout=0.3)
+                                           dropout=0.5)
 
         self.global_gnn_state = GCN(input_num=state_nums,
                                     hidden_num=hidden_nums,
@@ -167,44 +183,43 @@ class ChIMRL(torch.nn.Module):
 
         self.global_gnn_update_action = GCN(input_num=action_nums,
                                             hidden_num=hidden_nums,
-                                            out_num=hidden_nums, layer=2,
+                                            out_num=hidden_nums, layer=1,
                                             node_num=len(local_edges),
                                             edge_index=edge_index,
-                                            dropout=0.3)
+                                            dropout=0.5)
 
         self.global_gnn_action = GCN(input_num=action_nums,
                                      hidden_num=hidden_nums,
-                                     out_num=hidden_nums, layer=2,
+                                     out_num=hidden_nums, layer=1,
                                      node_num=len(local_edges), edge_index=edge_index, dropout=0.0)
 
         self.critic = Critic(hidden_nums=hidden_nums, output_nums=1,
                              node_nums=agents_nums, neighbor_nums=self.neighbor_nums)
 
         self.critic_update = Critic(hidden_nums=hidden_nums, neighbor_nums=self.neighbor_nums, output_nums=1,
-                                    node_nums=agents_nums, drop_out=0.3)
+                                    node_nums=agents_nums, drop_out=0.5)
 
         self.actor = Actor(hidden_nums=hidden_nums, freedom_degree=freedom_nums, state_nums=state_nums,
                            node_nums=agents_nums)
 
         self.actor_update = Actor(hidden_nums=hidden_nums, freedom_degree=freedom_nums, state_nums=state_nums,
-                                  node_nums=agents_nums, drop_out=0.3)
+                                  node_nums=agents_nums, drop_out=0.5)
 
         for m in [self.global_gnn_state, self.global_gnn_action, self.critic, self.actor]:
             for p in m.parameters():
                 p.requires_grad = False
 
-
     def generate_act(self, observation, task_nums=None, update: bool = False):
 
         if not update:
-            if (not isinstance(task_nums, np.ndarray)) and observation.device != self.gamma.device:
+            if (not isinstance(task_nums, np.ndarray)) and observation.device != self.edge_index.device:
                 observation = observation.to(self.gamma.device)
                 task_nums = task_nums.to(self.gamma.device)
             observation = self.global_gnn_state(observation).data
-            action, action_prob = self.actor(x=observation, edge_index=self.edge_index)
+            action, action_prob, action_entropy = self.actor(x=observation, edge_index=self.edge_index)
         else:
             observation = self.global_gnn_update_state(observation).data
-            action, action_prob = self.actor_update(x=observation, edge_index=self.edge_index)
+            action, action_prob, action_entropy = self.actor_update(x=observation, edge_index=self.edge_index)
 
         if task_nums is not None:
 
@@ -214,12 +229,12 @@ class ChIMRL(torch.nn.Module):
         else:
             actions_ = None
         B, M, _, _ = action.shape
-        return action.view(B, M, -1), action_prob, actions_
+        return action.view(B, M, -1), action_prob, action_entropy, actions_
 
     def get_pre(self, observation, action, update=True):
         observation = self.global_gnn_update_state(x=observation)
         if not update:
-          observation = observation.data
+            observation = observation.data
         action = self.global_gnn_update_action(x=action)
         return self.critic_update(observation, action, local_edges=self.local_edges)
 
@@ -228,19 +243,57 @@ class ChIMRL(torch.nn.Module):
         action = self.global_gnn_action(x=action)
         return self.critic(observation, action, local_edges=self.local_edges)
 
-    def return_ChI_Q(self, action_t, action_t_plus, states_t, states_t_plus, reward):
-        reward = (reward * self.gamma[:-1, :]).sum(1)
-        Q_t = self.get_pre(observation=states_t, action=action_t)
-        Q_t_plus = reward + self.gamma[[-1], 0] * self.get_target(observation=states_t_plus, action=action_t_plus)
-        return Q_t, Q_t_plus
+    @staticmethod
+    def normalization(x):
+        mean = x.mean(dim=0, keepdim=True)
+        std = x.std(dim=0, keepdim=True)
+        std = torch.where(std == 0, 1, std)
+        return (x - mean) / std
+
+    def return_ChI_Q(self, action_old, states, reward, update_actor: bool = False, lamb: float = 0.95,
+                     alpha: float = 0.05):
+        GAE = [0]
+        for t in range(self.step):
+
+            state = states[:, t, :, :]
+
+            if update_actor:
+                action, _, action_entropy, _ = self.generate_act(observation=state, update=True)
+            else:
+                action = action_old[:, t, :, :]
+                action_entropy = 0
+            Q, _ = self.get_pre(observation=state, action=action)
+            Q = (self.gamma ** t) * Q
+            if t == self.step - 1:
+                V_plus = (self.gamma ** (t + 1)) * reward[:, t, :]
+            else:
+                action_plus = action_old[:, t + 1, :, :]
+                state_plus = states[:, t + 1, :, :]
+                _, V = self.get_target(observation=state_plus, action=action_plus)
+                V_plus = (self.gamma ** (t + 1)) * (V + reward[:, t, :])
+            A = ((V_plus - Q) + GAE[-1]) * (lamb ** t) - action_entropy * alpha
+            GAE.append(A)
+        GAE = sum(GAE) * (1 - lamb)
+        return GAE
 
     def return_critic_update_parameters(self):
         return [{"params": self.global_gnn_update_state.parameters()},
                 {"params": self.critic_update.parameters()},
                 {"params": self.global_gnn_update_action.parameters()}]
 
-    def return_actor_update_parameters(self):
-        return [{"params": self.actor_update.parameters()}]
+    def return_actor_update_parameters_I(self):
+        return [{"params": self.actor_update.decide_mu[0].parameters()},
+                {"params": self.actor_update.decide_mu[2].parameters()},
+                {"params": self.actor_update.mlp[0].parameters()},
+                {"params": self.actor_update.mlp[2].parameters()},
+                {"params": self.actor_update.transformer[0].parameters()},
+                {"params": self.actor_update.transformer[2].parameters()},
+                ]
+
+    def return_actor_update_parameters_P(self):
+        return [{"params": self.actor_update.decide_mu[1].parameters()},
+                {"params": self.actor_update.mlp[1].parameters()},
+                {"params": self.actor_update.transformer[1].parameters()}]
 
     def soft_update(self, flag: bool, soft_update_weight):
         if flag:

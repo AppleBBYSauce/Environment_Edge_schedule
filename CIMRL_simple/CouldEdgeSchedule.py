@@ -227,7 +227,7 @@ class Env:
 
         # self.scheduler_critic.step()
 
-        if step > 100:
+        if step > 1:
             # update the actor
             scaler = GradScaler()
             for counter, data in enumerate(self.buffer.BufferLoader(self.batch_size)):

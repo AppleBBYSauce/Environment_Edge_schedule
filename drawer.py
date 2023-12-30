@@ -24,21 +24,22 @@ with open("data_source.txt") as f:
                                               "task_3 completion rate",
                                               "loss critic", "loss actor"
                                               ])
-    datas = datas.rolling(window=50).mean()
+    datas = datas.rolling(window=30).mean()
     datas["completion rate"] = datas[["task_1 completion rate",
                                               "task_2 completion rate",
                                               "task_3 completion rate"]].mean(axis=1)
-    # sns.lineplot(data=datas[["task_1 completion rate",
-    #                                           "task_2 completion rate",
-    #                                           "task_3 completion rate"]])
 
-    # sns.lineplot(data=datas[["task latency"]])
-    # sns.lineplot(data=datas[["loss critic"]])
-    sns.lineplot(data=datas[["completion rate"]])
+
+    # datas = datas.iloc[:1300]
     # sns.lineplot(data=datas[["task_1 completion rate",
     #                                           "task_2 completion rate",
     #                                           "task_3 completion rate"]])
-    print(datas.corr())
+    # sns.lineplot(data=datas[["loss critic"]])
+    sns.lineplot(data=datas[["task latency"]])
+    # sns.lineplot(data=datas[["completion rate"]])
+    # sns.lineplot(data=datas[["task_1 completion rate",
+    #                                           "task_2 completion rate",
+    #                                           "task_3 completion rate"]])
 
     # sns.scatterplot(data=datas, x="task_1 completion rate", y="task latency", legend="auto")
     # sns.scatterplot(data=datas, x="task_2 completion rate", y="task latency", legend="auto")
@@ -47,3 +48,7 @@ with open("data_source.txt") as f:
 
 
     plt.show()
+    sns.lineplot(data=datas[["completion rate"]])
+    plt.show()
+
+    print(datas.corr())

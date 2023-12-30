@@ -94,27 +94,26 @@ class Actor(torch.nn.Module):
         #
         # h_I = torch.stack(h_I, dim=2)
 
-        h_I = self.transformer(x, x, x)
+        x = self.transformer(x, x, x)
         action_parameters_mu = []
         action_parameter_In_sigma = []
 
         for idx, (mu, sigma) in enumerate(zip(self.decide_mu, self.decide_In_sigma)):
-            action_parameters_mu.append(mu(h_I[:, :, idx, :]))
-            # action_parameter_In_sigma.append(torch.tanh(sigma(h_I[idx])))
+            action_parameters_mu.append(mu(x[:, :, idx, :]))
+            action_parameter_In_sigma.append(torch.tanh(sigma(x[idx])))
 
         action_mu = torch.stack(action_parameters_mu, dim=2)
-        # action_In_sigma = torch.stack(action_parameter_In_sigma, dim=2)
+        action_In_sigma = torch.stack(action_parameter_In_sigma, dim=2)
 
-        # sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * torch.exp(
-        #     action_In_sigma))
+        sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * torch.exp(
+            action_In_sigma))
 
+        # sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * self.VAR)
 
-        sample_action = (action_mu + torch.randn(size=action_mu.shape, device=action_mu.device) * self.VAR)
+        sample_In_prob = (-action_In_sigma / 2) - ((sample_action - action_mu) ** 2 /
+                                                   (2 * torch.exp(action_In_sigma)))
 
-        # sample_In_prob = (-action_In_sigma / 2) - ((sample_action - action_mu) ** 2 /
-        #                                            (2 * torch.exp(action_In_sigma)))
-
-        sample_In_prob = -torch.log(CONST * self.VAR) - (((sample_action - action_mu) ** 2) / (2 * self.VAR ** 2))
+        # sample_In_prob = -torch.log(CONST * self.VAR) - (((sample_action - action_mu) ** 2) / (2 * self.VAR ** 2))
 
         sample_action[:, :, 0, :] = torch.softmax(torch.tanh(sample_action[:, :, 0, :]), dim=2)
 

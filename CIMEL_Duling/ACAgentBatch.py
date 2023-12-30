@@ -1,20 +1,10 @@
 # Item's name: ACAgent
 # Autor: bby
 # DateL 2023/12/3 18:27
-# Item's name: BaseAgent
-# Autor: bby
-# DateL 2023/12/3 18:26
 
-from BaseAgent import BaseAgent
-from Services import Services
 from TaskQueue import TaskQueue
-from abc import abstractmethod
-from collections import deque
 import numpy as np
-import _heapq
-import heapq
 import torch
-import copy
 
 np.random.seed(0)
 
@@ -83,11 +73,13 @@ class ACAgentBatch:
         for idx, (tq, rdq) in enumerate(zip(self.task_queue, self.re_direct_queue)):
             states.append(
                 torch.concat([
-                    torch.tensor(tq.get_size()),
-                    torch.tensor(rdq.get_size()),
                     self.p[idx],
+                    torch.tensor(tq.get_size()),
                     torch.tensor(tq.return_mean()).view(-1),
                     torch.tensor(tq.return_std()).view(-1),
+                    torch.tensor(rdq.get_size()),
+                    torch.tensor(rdq.return_mean()).view(-1),
+                    torch.tensor(rdq.return_std()).view(-1),
                 ])
             )
         return torch.stack(states, dim=0)
@@ -194,9 +186,9 @@ class ACAgentBatch:
             re_direct_queue.drop_with_key(func=lambda x, y: x > y, key="rd", y=self.tau[idx] / self.refresh_frequency)
 
         # add unselected tasks into redirect queue
-        for idx, (I_mig, temporary_state_inf, task_queue) in enumerate(
-                zip(I_mig_multiple, self.temporary_state_inf, self.task_queue)):
-            drop_nums = temporary_state_inf.get_size() * (~I_loc_multiple[idx])
+        for idx, (I_mig,I_loc, temporary_state_inf, task_queue) in enumerate(
+                zip(I_mig_multiple,I_loc_multiple, self.temporary_state_inf, self.task_queue)):
+            drop_nums = temporary_state_inf.get_size() * ((~I_loc) * (I_mig != idx))
             temporary_state_inf.drop_task_(number=drop_nums, reverse=True, key="rd", sort=True)
 
         # merger new task in process queue
@@ -225,7 +217,7 @@ class ACAgentBatch:
         # CT = np.sum(1 / sojourn_time, axis=1)
 
         mask_span_time = np.where(task_nums > 0, (self.cpu_cycles * task_nums) / (self.f * p_multiple),
-                                  self.tau * self.arrive_ratio).sum(1)
+                                  3 * self.tau * self.arrive_ratio).sum(1)
 
         return SW, TR, mask_span_time
 
